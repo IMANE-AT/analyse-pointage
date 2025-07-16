@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from analyse_logic import analyser_pointages, exporter_excel
+st.set_page_config(
+    page_title="PerformCheck",
+    page_icon="🔍"  # Optionnel : vous pouvez choisir un emoji comme icône
+)
 
 st.set_page_config(layout="wide")
 st.title("Système d'Analyse de Pointage et de Congés")
