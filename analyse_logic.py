@@ -3,7 +3,6 @@ from datetime import time, timedelta, date
 from itertools import product
 from io import BytesIO
 
-# --- Dictionnaire de Configuration et Règles (Inchangé) ---
 CONFIG = {
     'BASE_JOURS_PAYES': 26, 'DUREE_JOURNEE_NORMALE_HEURES': 8.0, 'JOUR_DIMANCHE': 'Sunday',
     'HEURE_DEBUT_JOURNEE_NORMALE': time(8, 30), 'HEURE_DEBUT_NUIT': time(21, 0),
@@ -26,7 +25,6 @@ REGLES_CONGES = {
     "AUTRE": {"mots_cles": [], "duree_max": 999, "paye_par": "Inconnu", "est_paye": False}
 }
 
-# --- Fonctions Utilitaires ---
 def find_and_rename_header(df, columns_map):
     df_copy = df.copy()
     for i in range(min(5, len(df_copy))):
@@ -67,8 +65,8 @@ def prepare_conges_df(df_conges_raw):
     df_conges.drop_duplicates(inplace=True)
     if 'Date_Fin' not in df_conges.columns:
         df_conges['Date_Fin'] = pd.NaT
-    df_conges['Date_Debut'] = pd.to_datetime(df_conges['Date_Debut'], errors='coerce')
-    df_conges['Date_Fin'] = pd.to_datetime(df_conges['Date_Fin'], errors='coerce').fillna(df_conges['Date_Debut'])
+    df_conges['Date_Debut'] = pd.to_datetime(df_conges['Date_Debut'], errors='coerce', dayfirst=True)
+    df_conges['Date_Fin'] = pd.to_datetime(df_conges['Date_Fin'], errors='coerce', dayfirst=True).fillna(df_conges['Date_Debut'])
     df_conges.dropna(subset=['Matricule', 'Date_Debut', 'Date_Fin'], inplace=True)
     def find_type(text):
         text_lower = str(text).lower()
@@ -82,7 +80,7 @@ def prepare_conges_df(df_conges_raw):
 
 def prepare_affectations_df(df_affectations_raw):
     if df_affectations_raw.empty:
-        return pd.DataFrame(columns=['Matricule', 'Date', 'Affectation', 'Lieu_Chantier', 'Projet_Domicile'])
+        return pd.DataFrame()
     affectations_cols_map = {
         'Matricule': ['matr', 'id'], 'Date': ['date'],
         'Affectation': ['affectation', 'tâche', 'tache', 'type'],
@@ -90,8 +88,6 @@ def prepare_affectations_df(df_affectations_raw):
         'Projet_Domicile': ['projet', 'domicile']
     }
     df_affectations = find_and_rename_header(df_affectations_raw.copy(), affectations_cols_map)
-    df_affectations['Date'] = pd.to_datetime(df_affectations['Date'], errors='coerce')
-    df_affectations.dropna(subset=['Matricule', 'Date', 'Affectation'], inplace=True)
     return df_affectations
 
 def get_full_date_range(mois, annee):
@@ -170,10 +166,8 @@ def calculer_indicateurs_jour_travaille(jour_pointages):
         'Heures_Pause_Dej': round(heures_pause_dej, 2)
     }
 
-# --- FONCTION PRINCIPALE D'ANALYSE (Signature Corrigée) ---
 def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw, df_affectations_manuel, mois, annee, jours_feries):
     
-    # 1. Préparation des données de chaque source
     pointage_cols_map = {'Matricule': ['matr', 'id'], 'Pointage': ['pointage', 'date']}
     df_pointage = find_and_rename_header(df_pointage_raw.copy(), pointage_cols_map)
     if not df_pointage.empty:
@@ -189,20 +183,21 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
     df_affectations_file = prepare_affectations_df(df_affectations_file_raw)
     df_affectations = pd.concat([df_affectations_file, df_affectations_manuel], ignore_index=True)
     if not df_affectations.empty:
-        df_affectations['Date'] = pd.to_datetime(df_affectations['Date'])
-        df_affectations.drop_duplicates(subset=['Matricule', 'Date'], keep='last', inplace=True)
-        df_affectations['Date'] = pd.to_datetime(df_affectations['Date'].dt.date)
+        if 'Date' in df_affectations.columns:
+            df_affectations['Date'] = pd.to_datetime(df_affectations['Date'], errors='coerce', dayfirst=True)
+            df_affectations.dropna(subset=['Matricule', 'Date', 'Affectation'], inplace=True)
+            df_affectations.drop_duplicates(subset=['Matricule', 'Date'], keep='last', inplace=True)
+            df_affectations['Date'] = df_affectations['Date'].dt.normalize()
+        else:
+            df_affectations = pd.DataFrame()
 
-    # 2. Création de la liste de tous les employés à partir des 3 sources
     matricules_pointage = pd.Series(df_pointage['Matricule'].astype(str).unique()) if not df_pointage.empty else pd.Series([], dtype=str)
     matricules_conges = pd.Series(df_conges['Matricule'].astype(str).unique()) if not df_conges.empty else pd.Series([], dtype=str)
     matricules_affectations = pd.Series(df_affectations['Matricule'].astype(str).unique()) if not df_affectations.empty else pd.Series([], dtype=str)
-
     all_matricules = pd.concat([matricules_pointage, matricules_conges, matricules_affectations]).unique()
 
     if len(all_matricules) == 0: return pd.DataFrame()
     
-    # 3. Traitement jour par jour pour chaque employé
     jours_feries_dates = {d.date() for d in pd.to_datetime(jours_feries)}
     full_date_range = get_full_date_range(mois, annee)
     
@@ -222,18 +217,16 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
                 'Heures_Bureau': 0, 'HS_Bureau_25': 0, 'HS_Bureau_50': 0, 'HS_Bureau_100': 0,
                 'Heures_Chantier': 0, 'HS_Chantier_25': 0, 'HS_Chantier_50': 0, 'HS_Chantier_100': 0,
                 'Heures_Domicile': 0, 'HS_Domicile_25': 0, 'HS_Domicile_50': 0, 'HS_Domicile_100': 0,
-                'Heures_Pause_Dej': 0, 'Absence_Injustifiee': False, 'Statut_Jour': 'Non Travaillé'
+                'Heures_Pause_Dej': 0, 'Absence_Injustifiee': False, 'Statut_Jour': 'Non Travaillé',
+                'Est_En_Retard': False  # NOUVEAU : Initialisation pour le calcul du score
             }
 
-            # --- Hiérarchie de décision ---
             conge_du_jour = df_conges[(df_conges['Matricule'].astype(str) == str(matricule)) & (df_conges['Date_Debut'] <= jour_dt) & (df_conges['Date_Fin'] >= jour_dt)]
             if not conge_du_jour.empty:
                 type_conge = conge_du_jour.iloc[0]['Type_Congé_Standard']
                 jour_est_decompte = False
-                if type_conge == "CONGE_MATERNITE":
-                    jour_est_decompte = True
-                elif jour_dt.weekday() < 6 and not est_jour_ferie:
-                     jour_est_decompte = True
+                if type_conge == "CONGE_MATERNITE": jour_est_decompte = True
+                elif jour_dt.weekday() < 6 and not est_jour_ferie: jour_est_decompte = True
                 if jour_est_decompte:
                     jour_actuel['Type_Congé'] = type_conge
                     jour_actuel['Statut_Jour'] = 'En Congé'
@@ -247,8 +240,16 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
                 heures_bureau_calc = calculer_indicateurs_jour_travaille(pointages_du_jour_copy)
                 for key, value in heures_bureau_calc.items(): jour_actuel[key] = value
                 jour_actuel['Statut_Jour'] = 'Bureau'
+                
+                # NOUVEAU : Calcul du retard
+                premier_pointage = pointages_du_jour.iloc[0]['Pointage']
+                heure_debut_theorique = CONFIG['HEURE_DEBUT_JOURNEE_NORMALE']
+                heure_debut_dt = pd.to_datetime(f"{jour_dt.date()} {heure_debut_theorique}")
+                limite_retard = heure_debut_dt + timedelta(minutes=CONFIG['TOLERANCE_RETARD_MIN'])
+                if premier_pointage > limite_retard:
+                    jour_actuel['Est_En_Retard'] = True
             
-            affectation_du_jour = df_affectations[(df_affectations['Matricule'].astype(str) == str(matricule)) & (df_affectations['Date'] == jour_dt)] if not df_affectations.empty else pd.DataFrame()
+            affectation_du_jour = df_affectations[(df_affectations['Matricule'].astype(str) == str(matricule)) & (df_affectations['Date'].dt.date == jour_dt.date())] if not df_affectations.empty else pd.DataFrame()
             if not affectation_du_jour.empty:
                 affectation_info = affectation_du_jour.iloc[0]
                 jour_actuel.update({
@@ -283,7 +284,6 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
     if not resultats_journaliers: return pd.DataFrame()
     df_analyse = pd.DataFrame(resultats_journaliers)
 
-    # 4. Agrégation mensuelle
     agg_dict = {
         'Heures_Bureau': ('Heures_Bureau', 'sum'), 'HS_Bureau_25': ('HS_Bureau_25', 'sum'),
         'HS_Bureau_50': ('HS_Bureau_50', 'sum'), 'HS_Bureau_100': ('HS_Bureau_100', 'sum'),
@@ -297,9 +297,9 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
         'Projet_Domicile': ('Projet_Domicile', lambda x: ', '.join(x.dropna().astype(str).unique())),
         'Nb Jours Chantier': ('Statut_Jour', lambda x: x.str.contains('Chantier').sum()),
         'Nb Jours Domicile': ('Statut_Jour', lambda x: x.str.contains('Domicile').sum()),
+        'Nb_Retards': ('Est_En_Retard', 'sum')  # NOUVEAU : Agréger le nombre de retards
     }
     resume_mensuel = df_analyse.groupby('Matricule').agg(**agg_dict).reset_index()
-    
     def aggregate_conges(series):
         types = [REGLES_CONGES.get(t, {}) for t in series if t and t != ""]
         paye_employeur = sum(1 for t in types if t.get('paye_par') == 'Employeur')
@@ -311,10 +311,7 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
     if not agg_conges.empty:
         agg_conges.columns = ['Nb Jours Congé Payé par Employeur', 'Nb Jours Congé Non Payé', 'Nb Jours Payé par CNSS', 'Détail des Congés']
         resume_mensuel = pd.merge(resume_mensuel, agg_conges, on='Matricule', how='left')
-    
     resume_mensuel.fillna(0, inplace=True)
-
-    # Calculs finaux
     resume_mensuel['Heures_Normales'] = resume_mensuel['Heures_Bureau'] + resume_mensuel['Heures_Chantier'] + resume_mensuel['Heures_Domicile']
     resume_mensuel['Heures_Sup_Maj25'] = resume_mensuel['HS_Bureau_25'] + resume_mensuel['HS_Chantier_25'] + resume_mensuel['HS_Domicile_25']
     resume_mensuel['Heures_Sup_Maj50'] = resume_mensuel['HS_Bureau_50'] + resume_mensuel['HS_Chantier_50'] + resume_mensuel['HS_Domicile_50']
@@ -326,20 +323,31 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
     resume_mensuel['Jours_Payés'] = CONFIG['BASE_JOURS_PAYES'] - resume_mensuel['Nb Jours Absence Injustifiée'] - resume_mensuel.get('Nb Jours Congé Non Payé', 0) - resume_mensuel.get('Nb Jours Payé par CNSS', 0)
     resume_mensuel['Jours_Payés'] = resume_mensuel['Jours_Payés'].clip(lower=0)
 
-    # Détails
+    # NOUVEAU : Calcul du Score de Discipline
+    jours_ouvrables = df_analyse.groupby('Matricule')['Est_Jour_Ouvrable'].sum().reset_index(name='Jours_Ouvrables')
+    resume_mensuel = pd.merge(resume_mensuel, jours_ouvrables, on='Matricule', how='left')
+    resume_mensuel['Jours_Ouvrables'] = resume_mensuel['Jours_Ouvrables'].fillna(0)
+    resume_mensuel['Conges_Autorises'] = resume_mensuel['Nb Jours Congé Payé par Employeur'] + resume_mensuel['Nb Jours Congé Non Payé'] + resume_mensuel['Nb Jours Payé par CNSS']
+    resume_mensuel['Jours_Prevus'] = resume_mensuel['Jours_Ouvrables'] - resume_mensuel['Conges_Autorises']
+    
+    penalite_points = (1 * resume_mensuel['Nb_Retards']) + (4 * resume_mensuel['Nb Jours Absence Injustifiée'])
+    
+    # Éviter la division par zéro si un employé n'a aucun jour prévu
+    score = 100 - (penalite_points / resume_mensuel['Jours_Prevus'].replace(0, pd.NA)) * 100
+    resume_mensuel['Score Discipline (%)'] = score.clip(0, 100).round(2).astype(str)
+    resume_mensuel.loc[resume_mensuel['Jours_Prevus'] <= 0, 'Score Discipline (%)'] = '-'
+
+
     jours_absence_detail = df_analyse[df_analyse['Absence_Injustifiee']].groupby('Matricule')['Date'].apply(lambda x: ', '.join(sorted([d.strftime('%d/%m/%Y') for d in x]))).reset_index(name='Détail des Absences')
     if not jours_absence_detail.empty: resume_mensuel = pd.merge(resume_mensuel, jours_absence_detail, on='Matricule', how='left')
     jours_conge_detail = df_analyse[df_analyse['Type_Congé'] != ""].groupby('Matricule')['Date'].apply(lambda x: ', '.join(sorted([d.strftime('%d/%m/%Y') for d in x]))).reset_index(name='Détail des Jours de Congé')
     if not jours_conge_detail.empty: resume_mensuel = pd.merge(resume_mensuel, jours_conge_detail, on='Matricule', how='left')
     resume_mensuel.fillna({'Détail des Absences': '', 'Détail des Jours de Congé': ''}, inplace=True)
-    
     resume_mensuel['Matricule_numeric'] = pd.to_numeric(resume_mensuel['Matricule'], errors='coerce')
     resume_mensuel.sort_values(by='Matricule_numeric', inplace=True, na_position='first')
     resume_mensuel.drop(columns=['Matricule_numeric'], inplace=True)
-    
     return resume_mensuel
 
-# --- FONCTION D'EXPORTATION ---
 def exporter_excel(df_resultats, nom_fichier, colonnes_choisies, return_df=False):
     output = BytesIO()
     df_export = df_resultats.copy()
@@ -355,13 +363,17 @@ def exporter_excel(df_resultats, nom_fichier, colonnes_choisies, return_df=False
         'Heures_Bureau': 'Heures Normales Bureau', 'Heures_Chantier': 'Heures Normales Chantier',
         'Heures_Domicile': 'Heures Normales Domicile', 'Heures_Sup_Maj25': 'Total HS 25%',
         'Heures_Sup_Maj50': 'Total HS 50%', 'Heures_Sup_Maj100': 'Total HS 100%',
+        'Nb_Retards': 'Nb Jours en Retard' # NOUVEAU : Renommage pour l'export
     }
     df_export = df_export.rename(columns=rename_dict_export)
     colonnes_a_exporter = [col for col in colonnes_choisies if col in df_export.columns]
-    df_final_export = df_export.reindex(columns=colonnes_a_exporter)
     
+    # Assurer que la nouvelle colonne est disponible si choisie
+    if 'Score Discipline (%)' not in colonnes_a_exporter and 'Score Discipline (%)' in colonnes_choisies:
+        colonnes_a_exporter.append('Score Discipline (%)')
+
+    df_final_export = df_export.reindex(columns=colonnes_a_exporter)
     if return_df: return df_final_export
-        
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_final_export.to_excel(writer, index=False, sheet_name='Rapport')
         worksheet = writer.sheets['Rapport']
@@ -370,6 +382,5 @@ def exporter_excel(df_resultats, nom_fichier, colonnes_choisies, return_df=False
             try: max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
             except (ValueError, TypeError): max_len = len(str(col)) + 2
             worksheet.set_column(idx, idx, max_len)
-            
     processed_data = output.getvalue()
     return processed_data
