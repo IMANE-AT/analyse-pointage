@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from analyse_logic import analyser_pointages, exporter_excel
-import db_logic as db # Importe notre nouveau fichier
+import db_logic as db
+import email_logic as mail
 
-# La configuration de la page reste au début
+# Configuration de la page (doit être la première commande Streamlit)
 st.set_page_config(
     page_title="PerformCheck",
     page_icon="🔍",
@@ -14,25 +15,26 @@ st.set_page_config(
 # Initialise la base de données au démarrage
 db.init_db()
 
-# --- Fonctions de gestion de l'interface ---
 
 def show_login_page():
-    """Affiche la page de connexion ou de création de compte."""
-    st.title("PerformCheck - Connexion")
-    
+    """Affiche soit le formulaire de création du premier compte, soit le formulaire de connexion."""
+    st.title("PerformCheck - Accès sécurisé")
+
+    # Cas 1 : Aucun utilisateur n'existe, il faut créer le premier compte admin
     if not db.check_if_users_exist():
         st.subheader("Bienvenue ! Créez le premier compte administrateur")
         with st.form("signup_form"):
-            new_username = st.text_input("Choisissez un nom d'utilisateur")
+            new_username = st.text_input("Choisissez un nom d'utilisateur (votre e-mail)")
             new_password = st.text_input("Choisissez un mot de passe", type="password")
             if st.form_submit_button("Créer le compte"):
                 success, message = db.add_user(new_username, new_password)
                 if success:
                     st.success(message)
                     st.info("Veuillez maintenant vous connecter.")
-                    st.rerun() # CORRIGÉ
+                    st.rerun()
                 else:
                     st.error(message)
+    # Cas 2 : Des utilisateurs existent, on affiche la page de connexion
     else:
         st.subheader("Connexion")
         with st.form("login_form"):
@@ -42,23 +44,72 @@ def show_login_page():
                 if db.check_user(username, password):
                     st.session_state['logged_in'] = True
                     st.session_state['username'] = username
-                    st.rerun() # CORRIGÉ
+                    st.rerun()
                 else:
                     st.error("Nom d'utilisateur ou mot de passe incorrect.")
 
+        st.subheader("Mot de passe oublié ?")
+        with st.form("forgot_password_form"):
+            email_to_reset = st.text_input("Entrez votre nom d'utilisateur (votre e-mail) pour réinitialiser")
+            if st.form_submit_button("Envoyer le lien de réinitialisation"):
+                token = db.set_reset_token(email_to_reset)
+                if token:
+                    # Obtenir l'URL de base de l'application déployée
+                    app_url = st.get_option("server.baseUrlPath")
+                    if not app_url.startswith("http"):
+                       app_url = "http://localhost:8501" 
+                    
+                    if mail.send_reset_email(email_to_reset, token, app_url):
+                        st.success("Un e-mail de réinitialisation a été envoyé.")
+                    else:
+                        st.error("Impossible d'envoyer l'e-mail. Contactez l'administrateur.")
+                else:
+                    st.error("Aucun compte trouvé pour cet utilisateur.")
+
+def show_reset_password_page(token):
+    """Affiche la page pour entrer un nouveau mot de passe."""
+    st.title("Réinitialiser votre mot de passe")
+    with st.form("reset_form"):
+        new_password = st.text_input("Entrez votre nouveau mot de passe", type="password")
+        confirm_password = st.text_input("Confirmez le nouveau mot de passe", type="password")
+        if st.form_submit_button("Valider"):
+            if new_password == confirm_password:
+                success, message = db.reset_password_with_token(token, new_password)
+                if success:
+                    st.success(message)
+                    st.info("Vous pouvez maintenant fermer cet onglet et vous connecter.")
+                else:
+                    st.error(message)
+            else:
+                st.error("Les mots de passe ne correspondent pas.")
+
+
 def show_main_app():
-    """Affiche l'application principale une fois connecté."""
+    """Affiche l'application principale d'analyse une fois connecté."""
 
     st.sidebar.success(f"Connecté en tant que {st.session_state['username']}")
     if st.sidebar.button("Se déconnecter"):
         del st.session_state['logged_in']
         del st.session_state['username']
-        st.rerun() # CORRIGÉ
+        st.rerun()
 
-    # ==================================================================
-    # === VOTRE CODE ORIGINAL EST INTÉGRÉ CI-DESSOUS SANS CHANGEMENT ===
-    # ==================================================================
+    with st.sidebar.expander("Changer le mot de passe"):
+        with st.form("change_password_form", clear_on_submit=True):
+            old_password = st.text_input("Ancien mot de passe", type="password")
+            new_password = st.text_input("Nouveau mot de passe", type="password")
+            confirm_password = st.text_input("Confirmer le nouveau mot de passe", type="password")
+            
+            if st.form_submit_button("Valider"):
+                if new_password == confirm_password:
+                    success, message = db.update_password(st.session_state['username'], old_password, new_password)
+                    if success:
+                        st.sidebar.success(message)
+                    else:
+                        st.sidebar.error(message)
+                else:
+                    st.sidebar.error("Les nouveaux mots de passe ne correspondent pas.")
 
+    # --- Votre application d'analyse commence ici ---
     st.title("Système d'Analyse de Pointage et de Congés")
 
     if 'affectations_manuelles' not in st.session_state:
@@ -116,6 +167,7 @@ def show_main_app():
 
     if pointage_file is not None:
         st.subheader("Étape 2 : Définir les paramètres d'analyse")
+        # ... (Le reste de votre code est identique)
         param_col1, param_col2 = st.columns(2)
         with param_col1:
             current_year = date.today().year
@@ -144,7 +196,7 @@ def show_main_app():
         ]
         selection_par_defaut = [
             'Matricule', 'Score Discipline (%)',
-            'Jours Payés (par Employeur)', 'Nb Jours Absence Injustifiée', 'Total Heures Normales', 'Total Majorations',
+            'Jours Payés (par Employeur)', 'Nb Jours Absence Injustifiée', 'Total Majorations',
             'Nb Jours Chantier', 'Nb Jours Domicile'
         ]
         colonnes_choisies = st.multiselect(
@@ -196,8 +248,14 @@ def show_main_app():
                 st.error(f"Une erreur est survenue lors de l'analyse : {e}")
                 st.error("Veuillez vérifier le format de vos fichiers et les données saisies.")
 
-# --- Point d'entrée principal de l'application ---
-if st.session_state.get('logged_in', False):
+
+# Vérifie si un token de reset est dans l'URL
+query_params = st.query_params
+if "reset_token" in query_params:
+    show_reset_password_page(query_params["reset_token"])
+# Vérifie si l'utilisateur est connecté
+elif st.session_state.get('logged_in', False):
     show_main_app()
+# Sinon, affiche la page de connexion
 else:
     show_login_page()
