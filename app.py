@@ -171,7 +171,7 @@ def show_main_app():
         param_col1, param_col2 = st.columns(2)
         with param_col1:
             current_year = date.today().year
-            annee = st.selectbox("Année", range(current_year, current_year + 10), index=0)
+            annee = st.selectbox("Année", range(2023, current_year + 15), index=0)
         with param_col2:
             current_month = date.today().month
             mois = st.selectbox("Mois", range(1, 13), index=current_month - 1)
