@@ -15,6 +15,36 @@ st.set_page_config(
 # Initialise la base de données au démarrage
 db.init_db()
 
+def set_professional_styles():
+    st.markdown("""
+        <style>
+        /* 1. Mettre en forme le titre principal */
+        .st-emotion-cache-10trblm h1 {
+            color: #0083B8; /* Couleur primaire du thème */
+            border-bottom: 3px solid #0083B8;
+            padding-bottom: 5px;
+            font-weight: 700;
+        }
+        /* 2. Style des sous-titres (H2, H3, H4) */
+        h2, h3, h4 {
+            color: #C0C0C0; /* Couleur claire pour les sections */
+        }
+        /* 3. Style des boutons primaires pour qu'ils ressortent */
+        /* Ceci cible le bouton "Lancer l'analyse" */
+        .st-emotion-cache-nahz7x { 
+            background-color: #0083B8;
+            color: white;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        /* 4. Améliorer la lisibilité du texte dans les conteneurs */
+        .st-emotion-cache-1ftrz1t {
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #444444; 
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
 # Dans app.py, remplacez la fonction show_login_page existante
 
@@ -124,19 +154,27 @@ def show_reset_password_page(token):
 def show_main_app():
     """Affiche l'application principale d'analyse une fois connecté."""
 
+    # 1. APPLICATION DES STYLES PROFESSIONNELS
+    set_professional_styles()
+
+    # --- Sidebar (Barre Latérale) ---
     st.sidebar.success(f"Connecté en tant que {st.session_state['username']}")
-    if st.sidebar.button("Se déconnecter"):
+    
+    # Bouton de Déconnexion
+    if st.sidebar.button("Se déconnecter", use_container_width=True): # Ajout de use_container_width
         del st.session_state['logged_in']
         del st.session_state['username']
         st.rerun()
 
-    with st.sidebar.expander("Changer le mot de passe"):
-        with st.form("change_password_form", clear_on_submit=True):
+    # --- Panneau de Paramètres Utilisateur ---
+    with st.sidebar.expander("⚙️ Changer le mot de passe"):
+        # CORRECTION MAJEURE: Clé de formulaire UNICITÉ.
+        with st.form("change_password_form_sidebar", clear_on_submit=True): 
             old_password = st.text_input("Ancien mot de passe", type="password")
             new_password = st.text_input("Nouveau mot de passe", type="password")
             confirm_password = st.text_input("Confirmer le nouveau mot de passe", type="password")
             
-            if st.form_submit_button("Valider"):
+            if st.form_submit_button("Valider", type="primary"): # Ajout de type="primary"
                 if new_password == confirm_password:
                     success, message = db.update_password(st.session_state['username'], old_password, new_password)
                     if success:
@@ -146,12 +184,13 @@ def show_main_app():
                 else:
                     st.sidebar.error("Les nouveaux mots de passe ne correspondent pas.")
 
-    # --- Votre application d'analyse commence ici ---
+    # --- Application Principale (Corps) ---
     st.title("Système d'Analyse de Pointage et de Congés")
 
     if 'affectations_manuelles' not in st.session_state:
         st.session_state.affectations_manuelles = []
 
+    # --- Étape 1 : Charger les fichiers ---
     st.subheader("Étape 1 : Charger les fichiers")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -161,7 +200,11 @@ def show_main_app():
     with col3:
         affectations_file = st.file_uploader("Fichier des Affectations (Optionnel)", type=["xlsx", "xls"])
 
-    with st.expander("✍️ Ajouter/Corriger une affectation manuellement (pour les cas urgents)"):
+    # --- Amélioration UX : Affectation Manuelle dans un Conteneur Bordé ---
+    st.subheader("✍️ Gestion des Affectations Manuelles")
+    # Changement: Utilisation de st.container(border=True) au lieu de st.expander
+    with st.container(border=True): 
+        st.markdown("**Ajouter ou Corriger une affectation manuellement (Priorité Absolue)**")
         with st.form("formulaire_affectation", clear_on_submit=True):
             st.write("Les entrées manuelles écrasent les données du fichier Excel pour le même jour.")
             col_form1, col_form2, col_form3 = st.columns(3)
@@ -175,7 +218,7 @@ def show_main_app():
             manuel_lieu = st.text_input("Lieu du Chantier (si applicable)")
             manuel_projet = st.text_input("Projet (si travail à domicile)")
 
-            submitted = st.form_submit_button("Ajouter l'affectation")
+            submitted = st.form_submit_button("Ajouter l'affectation", type="primary") # Ajout type="primary"
             if submitted and manuel_matricule and manuel_date and manuel_affectation:
                 st.session_state.affectations_manuelles.append({
                     'Matricule': manuel_matricule, 'Date': manuel_date,
@@ -189,6 +232,7 @@ def show_main_app():
     if not st.session_state.affectations_manuelles:
         st.info("Aucune affectation manuelle n'a été ajoutée pour le moment.")
     else:
+        # Affichage des affectations manuelles
         col_spec = [1.5, 2, 2, 4, 2]
         cols = st.columns(col_spec)
         cols[0].markdown("**Matricule**"); cols[1].markdown("**Date**"); cols[2].markdown("**Type**"); cols[3].markdown("**Lieu / Projet**")
@@ -203,8 +247,9 @@ def show_main_app():
                 st.rerun()
 
     if pointage_file is not None:
+        # --- ÉTAPE 2 : Définir les paramètres d'analyse ---
         st.subheader("Étape 2 : Définir les paramètres d'analyse")
-        # ... (Le reste de votre code est identique)
+        
         param_col1, param_col2 = st.columns(2)
         with param_col1:
             current_year = date.today().year
@@ -219,6 +264,7 @@ def show_main_app():
             format_func=lambda d: d.strftime('%A %d %B %Y')
         )
 
+        # --- ÉTAPE 3 : Choisir les colonnes pour le rapport final ---
         st.subheader("Étape 3 : Choisir les colonnes pour le rapport final")
         toutes_les_colonnes_possibles = [
             'Matricule', 'Score Discipline (%)',
