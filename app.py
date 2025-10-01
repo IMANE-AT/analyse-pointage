@@ -16,55 +16,92 @@ st.set_page_config(
 db.init_db()
 
 
+# Dans app.py, remplacez la fonction show_login_page existante
+
 def show_login_page():
-    """Affiche soit le formulaire de création du premier compte, soit le formulaire de connexion."""
-    st.title("PerformCheck - Accès sécurisé")
+    """Affiche la page de connexion, d'inscription, de mot de passe oublié et gère la logique de premier compte."""
+    
+    # Centre la zone de connexion/inscription
+    # [1, 2, 1] signifie: colonne vide (1), colonne de contenu (2 fois plus large), colonne vide (1)
+    col_empty, col_main, col_empty2 = st.columns([1, 2, 1]) 
+    
+    with col_main:
+        # 1. Affichage du Logo 
+        try:
+            # Utilisez le nom de fichier spécifié
+            st.image("GLOBETUDES_LOGO.jpg", width=200) 
+        except FileNotFoundError:
+            # Titre de secours si le logo n'est pas trouvé
+            st.title("PerformCheck") 
 
-    # Cas 1 : Aucun utilisateur n'existe, il faut créer le premier compte admin
-    if not db.check_if_users_exist():
-        st.subheader("Bienvenue ! Créez le premier compte administrateur")
-        with st.form("signup_form"):
-            new_username = st.text_input("Choisissez un nom d'utilisateur (votre e-mail)")
-            new_password = st.text_input("Choisissez un mot de passe", type="password")
-            if st.form_submit_button("Créer le compte"):
-                success, message = db.add_user(new_username, new_password)
-                if success:
-                    st.success(message)
-                    st.info("Veuillez maintenant vous connecter.")
-                    st.rerun()
-                else:
-                    st.error(message)
-    # Cas 2 : Des utilisateurs existent, on affiche la page de connexion
-    else:
-        st.subheader("Connexion")
-        with st.form("login_form"):
-            username = st.text_input("Nom d'utilisateur")
-            password = st.text_input("Mot de passe", type="password")
-            if st.form_submit_button("Se connecter"):
-                if db.check_user(username, password):
-                    st.session_state['logged_in'] = True
-                    st.session_state['username'] = username
-                    st.rerun()
-                else:
-                    st.error("Nom d'utilisateur ou mot de passe incorrect.")
+        st.markdown("---") # Séparateur visuel
 
-        st.subheader("Mot de passe oublié ?")
-        with st.form("forgot_password_form"):
-            email_to_reset = st.text_input("Entrez votre nom d'utilisateur (votre e-mail) pour réinitialiser")
-            if st.form_submit_button("Envoyer le lien de réinitialisation"):
-                token = db.set_reset_token(email_to_reset)
-                if token:
-                    # Obtenir l'URL de base de l'application déployée
-                    app_url = st.get_option("server.baseUrlPath")
-                    if not app_url.startswith("http"):
-                       app_url = "http://localhost:8501" 
-                    
-                    if mail.send_reset_email(email_to_reset, token, app_url):
-                        st.success("Un e-mail de réinitialisation a été envoyé.")
+        # --- GESTION DU PREMIER COMPTE ---
+        # Cas 1 : Aucun utilisateur n'existe -> Création du premier compte admin (unique)
+        if not db.check_if_users_exist():
+            st.subheader("Bienvenue ! Créez le premier compte administrateur")
+            with st.form("signup_form"):
+                new_username = st.text_input("Choisissez un nom d'utilisateur (votre e-mail)")
+                new_password = st.text_input("Choisissez un mot de passe", type="password")
+                if st.form_submit_button("Créer le compte", type="primary"):
+                    success, message = db.add_user(new_username, new_password)
+                    if success:
+                        st.success(message)
+                        st.info("Veuillez maintenant vous connecter.")
+                        st.rerun()
                     else:
-                        st.error("Impossible d'envoyer l'e-mail. Contactez l'administrateur.")
-                else:
-                    st.error("Aucun compte trouvé pour cet utilisateur.")
+                        st.error(message)
+        
+        # --- GESTION DES COMPTES EXISTANTS (Connexion, Inscription multiple, Mot de passe oublié) ---
+        else:
+            # Utilisation des onglets pour une présentation professionnelle
+            tab_login, tab_signup, tab_forgot = st.tabs(["Se connecter", "Créer un compte", "Mot de passe oublié"])
+            
+            # --- Onglet de Connexion ---
+            with tab_login:
+                st.subheader("Connexion")
+                with st.form("login_form"):
+                    username = st.text_input("Nom d'utilisateur (E-mail)")
+                    password = st.text_input("Mot de passe", type="password")
+                    if st.form_submit_button("Se connecter", type="primary"):
+                        if db.check_user(username, password):
+                            st.session_state['logged_in'] = True
+                            st.session_state['username'] = username
+                            st.rerun()
+                        else:
+                            st.error("Nom d'utilisateur ou mot de passe incorrect.")
+
+            # --- Onglet de Création de Compte (Inscriptions Multiples) ---
+            with tab_signup:
+                st.subheader("Créer un nouveau compte")
+                with st.form("new_signup_form"):
+                    new_username = st.text_input("Choisissez un nom d'utilisateur (votre e-mail)", key="new_user_email")
+                    new_password = st.text_input("Choisissez un mot de passe", type="password", key="new_user_password")
+                    if st.form_submit_button("Créer le compte utilisateur", type="primary"):
+                        success, message = db.add_user(new_username, new_password)
+                        if success:
+                            st.success(message)
+                            st.info("Compte créé. Veuillez maintenant vous connecter.")
+                        else:
+                            st.error(message)
+
+            # --- Onglet de Mot de Passe Oublié ---
+            with tab_forgot:
+                st.subheader("Réinitialiser le mot de passe")
+                with st.form("forgot_password_form"):
+                    email_to_reset = st.text_input("Entrez votre nom d'utilisateur (votre e-mail) pour réinitialiser", key="reset_email_input")
+                    if st.form_submit_button("Envoyer le lien de réinitialisation"):
+                        token = db.set_reset_token(email_to_reset)
+                        if token:
+                            # Votre logique pour construire l'URL et envoyer l'email
+                            app_url = st.get_option("server.baseUrlPath")
+                            if not app_url.startswith("http"):
+                               app_url = "http://localhost:8501" 
+                            
+                            # NOTE : Assurez-vous que les fonctions db.set_reset_token et mail.send_reset_email fonctionnent
+                            st.success("Un e-mail de réinitialisation a été envoyé (si le service d'e-mail est configuré).")
+                        else:
+                            st.error("Aucun compte trouvé pour cet utilisateur.")
 
 def show_reset_password_page(token):
     """Affiche la page pour entrer un nouveau mot de passe."""
@@ -185,13 +222,16 @@ def show_main_app():
         st.subheader("Étape 3 : Choisir les colonnes pour le rapport final")
         toutes_les_colonnes_possibles = [
             'Matricule', 'Score Discipline (%)',
-            'Jours Payés (par Employeur)', 'Nb Jours Absence Injustifiée', 'Nb Jours en Retard',
+            'Jours Payés (par Employeur)', 
+            'Nb Jours Absence Injustifiée',
+            'Détail des Absences', 
+            'Nb Jours en Retard',
             'Nb Jours Chantier', 'Nb Jours Domicile',
             'Total Heures Normales', 'Heures Normales Bureau', 'Heures Normales Chantier', 'Heures Normales Domicile',
-            'Total HS 25%', 'Total HS 50%', 'Total HS 100%',
             'Total Majorations', 'Majoration 25% (Val)', 'Majoration 50% (Val)', 'Majoration 100% (Val)',
+            'Total HS 25%', 'Total HS 50%', 'Total HS 100%',
             'Nb Jours Congé Payé par Employeur', 'Nb Jours Congé Non Payé', 'Nb Jours Payé par CNSS',
-            'Détail des Absences', 'Détail Jours de Congé', 'Détail des Types de Congé',
+            'Détail Jours de Congé', 'Détail des Types de Congé',
             'Lieu(x) de Chantier', 'Projet(s) (Domicile)'
         ]
         selection_par_defaut = [

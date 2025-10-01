@@ -134,6 +134,79 @@ def calculer_heures_supplementaires(debut, fin, jour_semaine, est_jour_ferie, he
         h_sup25 += max(0, heures_sup_jour - heures_nuit_valide)
     return heures_normales, h_sup25, h_sup50, h_sup100
 
+
+def calculer_presence_par_blocs(pointages_du_jour, jour_dt, jour_semaine):
+    if pointages_du_jour.empty:
+        type_absence = "Journée complète (Samedi)" if jour_semaine == CONFIG['JOUR_SAMEDI'] else "Journée complète"
+        return 0.0, type_absence
+
+    periodes_travail = []
+    pointages = sorted(pointages_du_jour['Pointage'].tolist())
+    
+    pointage_isole = None
+    if len(pointages) % 2 != 0:
+        pointage_isole = pointages.pop()
+
+    for i in range(0, len(pointages), 2):
+        debut_travail = pointages[i]
+        fin_travail = pointages[i+1]
+        if pd.notna(debut_travail) and pd.notna(fin_travail):
+            periodes_travail.append((debut_travail, fin_travail))
+
+    if not periodes_travail and not pointage_isole:
+        type_absence = "Journée complète (Samedi)" if jour_semaine == CONFIG['JOUR_SAMEDI'] else "Journée complète"
+        return 0.0, type_absence
+
+    date_jour = jour_dt.date()
+    bloc_matin_debut = pd.to_datetime(f"{date_jour} {CONFIG['HEURE_DEBUT_JOURNEE_NORMALE']}")
+    bloc_matin_fin = pd.to_datetime(f"{date_jour} {CONFIG['HEURE_DEBUT_PAUSE_DEJ']}")
+    
+    if jour_semaine == CONFIG['JOUR_VENDREDI']:
+        bloc_soir_debut = pd.to_datetime(f"{date_jour} {CONFIG['HEURE_FIN_PAUSE_DEJ_VENDREDI']}")
+        bloc_soir_fin = pd.to_datetime(f"{date_jour} {CONFIG['HEURE_FIN_JOURNEE_NORMALE_VENDREDI_THEORIQUE']}")
+    else:
+        bloc_soir_debut = pd.to_datetime(f"{date_jour} {CONFIG['HEURE_FIN_PAUSE_DEJ_LUN_JEU']}")
+        bloc_soir_fin = pd.to_datetime(f"{date_jour} {CONFIG['HEURE_FIN_JOURNEE_NORMALE_STANDARD_THEORIQUE']}")
+
+    presence_matin = False
+    for debut, fin in periodes_travail:
+        if debut < bloc_matin_fin and fin > bloc_matin_debut:
+            presence_matin = True
+            break
+
+    presence_soir = False
+    if jour_semaine != CONFIG['JOUR_SAMEDI']:
+        for debut, fin in periodes_travail:
+            if debut < bloc_soir_fin and fin > bloc_soir_debut:
+                presence_soir = True
+                break
+    
+    if pointage_isole:
+        if not presence_matin and (bloc_matin_debut <= pointage_isole < bloc_matin_fin):
+            presence_matin = True
+            
+        # --- DÉBUT DE LA MODIFICATION ---
+        # Ancienne condition : if not presence_soir and (bloc_soir_debut <= pointage_isole < bloc_soir_fin):
+        # Nouvelle condition : On vérifie juste si le pointage est après le début du bloc soir.
+        if not presence_soir and (pointage_isole >= bloc_soir_debut):
+            presence_soir = True
+        # --- FIN DE LA MODIFICATION ---
+
+    if jour_semaine == CONFIG['JOUR_SAMEDI']:
+        return (1.0, "") if presence_matin else (0.0, "Journée complète (Samedi)")
+    else:
+        score = 0.0
+        if presence_matin: score += 0.5
+        if presence_soir: score += 0.5
+        
+        type_absence = ""
+        if score == 0.0:
+            type_absence = "Journée complète"
+        elif score == 0.5:
+            type_absence = "Soir" if presence_matin else "Matin"
+        
+        return score, type_absence
+
 def calculer_indicateurs_jour_travaille(jour_pointages):
     heures_normales, h_sup25, h_sup50, h_sup100, heures_pause_dej = 0.0, 0.0, 0.0, 0.0, 0.0
     date_jour = jour_pointages.iloc[0]['Date']
@@ -167,19 +240,31 @@ def calculer_indicateurs_jour_travaille(jour_pointages):
     }
 
 def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw, df_affectations_manuel, mois, annee, jours_feries):
-    
     pointage_cols_map = {'Matricule': ['matr', 'id'], 'Pointage': ['pointage', 'date']}
     df_pointage = find_and_rename_header(df_pointage_raw.copy(), pointage_cols_map)
     if not df_pointage.empty:
         df_pointage['Pointage'] = pd.to_datetime(df_pointage['Pointage'], errors='coerce')
         df_pointage.dropna(subset=['Pointage'], inplace=True)
         df_pointage.sort_values(['Matricule', 'Pointage'], inplace=True)
-        diff_temps = df_pointage.groupby('Matricule')['Pointage'].diff()
-        df_pointage = df_pointage[(diff_temps > timedelta(minutes=10)) | (diff_temps.isnull())]
+        
+        indices_a_garder = []
+        last_matricule = None
+        last_time_kept = pd.NaT
+        intervalle_securite = timedelta(minutes=10)
+
+        for index, row in df_pointage.iterrows():
+            if row['Matricule'] != last_matricule:
+                last_matricule = row['Matricule']
+                last_time_kept = pd.NaT
+            
+            if pd.isna(last_time_kept) or (row['Pointage'] - last_time_kept > intervalle_securite):
+                indices_a_garder.append(index)
+                last_time_kept = row['Pointage']
+        
+        df_pointage = df_pointage.loc[indices_a_garder].reset_index(drop=True)
         df_pointage['Date'] = pd.to_datetime(df_pointage['Pointage'].dt.date)
 
     df_conges = prepare_conges_df(df_conges_raw)
-    
     df_affectations_file = prepare_affectations_df(df_affectations_file_raw)
     df_affectations = pd.concat([df_affectations_file, df_affectations_manuel], ignore_index=True)
     if not df_affectations.empty:
@@ -202,7 +287,6 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
     full_date_range = get_full_date_range(mois, annee)
     
     resultats_journaliers = []
-
     for matricule in all_matricules:
         for jour in full_date_range:
             jour_dt = pd.to_datetime(jour)
@@ -214,71 +298,69 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
                 'Matricule': matricule, 'Date': jour_dt.date(), 'Jour_Semaine': jour_semaine, 
                 'Est_JourFerie': est_jour_ferie, 'Est_Jour_Ouvrable': est_jour_ouvrable,
                 'Type_Congé': '', 'Affectation': '', 'Lieu_Chantier': '', 'Projet_Domicile': '',
-                'Heures_Bureau': 0, 'HS_Bureau_25': 0, 'HS_Bureau_50': 0, 'HS_Bureau_100': 0,
-                'Heures_Chantier': 0, 'HS_Chantier_25': 0, 'HS_Chantier_50': 0, 'HS_Chantier_100': 0,
-                'Heures_Domicile': 0, 'HS_Domicile_25': 0, 'HS_Domicile_50': 0, 'HS_Domicile_100': 0,
-                'Heures_Pause_Dej': 0, 'Absence_Injustifiee': False, 'Statut_Jour': 'Non Travaillé',
-                'Est_En_Retard': False  # NOUVEAU : Initialisation pour le calcul du score
+                'Jours_Presence_Travail': 0.0, 'Type_Absence_Jour': '', 'Statut_Jour': 'Non Travaillé',
+                'Est_En_Retard': False, 'Heures_Bureau': 0, 'HS_Bureau_25': 0, 'HS_Bureau_50': 0,
+                'HS_Bureau_100': 0, 'Heures_Chantier': 0, 'HS_Chantier_25': 0, 'HS_Chantier_50': 0,
+                'HS_Chantier_100': 0, 'Heures_Domicile': 0, 'HS_Domicile_25': 0, 'HS_Domicile_50': 0,
+                'HS_Domicile_100': 0,
             }
 
             conge_du_jour = df_conges[(df_conges['Matricule'].astype(str) == str(matricule)) & (df_conges['Date_Debut'] <= jour_dt) & (df_conges['Date_Fin'] >= jour_dt)]
             if not conge_du_jour.empty:
                 type_conge = conge_du_jour.iloc[0]['Type_Congé_Standard']
-                jour_est_decompte = False
-                if type_conge == "CONGE_MATERNITE": jour_est_decompte = True
-                elif jour_dt.weekday() < 6 and not est_jour_ferie: jour_est_decompte = True
+                jour_est_decompte = (jour_dt.weekday() < 6 and not est_jour_ferie) or type_conge == "CONGE_MATERNITE"
                 if jour_est_decompte:
                     jour_actuel['Type_Congé'] = type_conge
                     jour_actuel['Statut_Jour'] = 'En Congé'
                     resultats_journaliers.append(jour_actuel)
                     continue
+            
+            if not est_jour_ouvrable:
+                resultats_journaliers.append(jour_actuel)
+                continue
+
+            affectation_du_jour = df_affectations[(df_affectations['Matricule'].astype(str) == str(matricule)) & (df_affectations['Date'].dt.date == jour_dt.date())] if not df_affectations.empty else pd.DataFrame()
+            if not affectation_du_jour.empty:
+                affectation_info = affectation_du_jour.iloc[0]
+                jour_actuel.update({'Affectation': affectation_info.get('Affectation', ''), 'Lieu_Chantier': affectation_info.get('Lieu_Chantier', ''), 'Projet_Domicile': affectation_info.get('Projet_Domicile', '')})
+                jour_actuel['Jours_Presence_Travail'] = 1.0
+                jour_actuel['Statut_Jour'] = affectation_info.get('Affectation', 'Affectation')
+                
+                affectation_type = str(affectation_info.get('Affectation', '')).lower()
+                if 'chantier' in affectation_type or 'domicile' in affectation_type:
+                    debut_virtuel = pd.to_datetime(f"{jour.isoformat()} {CONFIG['HEURE_DEBUT_JOURNEE_NORMALE']}")
+                    heure_fin_theorique = CONFIG['HEURE_FIN_TRAVAIL_SAMEDI_MATIN'] if jour_semaine == CONFIG['JOUR_SAMEDI'] else CONFIG['HEURE_FIN_JOURNEE_NORMALE_STANDARD_THEORIQUE']
+                    fin_virtuel = pd.to_datetime(f"{jour.isoformat()} {heure_fin_theorique}")
+                    hn, h25, h50, h100 = calculer_heures_supplementaires(debut_virtuel, fin_virtuel, jour_semaine, est_jour_ferie, 0)
+                    
+                    if 'chantier' in affectation_type: jour_actuel.update({'Heures_Chantier': hn, 'HS_Chantier_25': h25, 'HS_Chantier_50': h50, 'HS_Chantier_100': h100})
+                    if 'domicile' in affectation_type: jour_actuel.update({'Heures_Domicile': hn, 'HS_Domicile_25': h25, 'HS_Domicile_50': h50, 'HS_Domicile_100': h100})
+                resultats_journaliers.append(jour_actuel)
+                continue
 
             pointages_du_jour = df_pointage[(df_pointage['Matricule'].astype(str) == str(matricule)) & (df_pointage['Date'] == jour_dt)] if not df_pointage.empty else pd.DataFrame()
-            if not pointages_du_jour.empty:
+            
+            score_presence, type_absence = calculer_presence_par_blocs(pointages_du_jour, jour_dt, jour_semaine)
+            
+            jour_actuel['Jours_Presence_Travail'] = score_presence
+            jour_actuel['Type_Absence_Jour'] = type_absence
+
+            if score_presence > 0:
+                jour_actuel['Statut_Jour'] = 'Bureau'
                 pointages_du_jour_copy = pointages_du_jour.copy()
                 pointages_du_jour_copy['Est_JourFerie'] = est_jour_ferie
-                heures_bureau_calc = calculer_indicateurs_jour_travaille(pointages_du_jour_copy)
-                for key, value in heures_bureau_calc.items(): jour_actuel[key] = value
-                jour_actuel['Statut_Jour'] = 'Bureau'
+                heures_calculees = calculer_indicateurs_jour_travaille(pointages_du_jour_copy)
+                jour_actuel.update(heures_calculees)
                 
-                # NOUVEAU : Calcul du retard
                 premier_pointage = pointages_du_jour.iloc[0]['Pointage']
                 heure_debut_theorique = CONFIG['HEURE_DEBUT_JOURNEE_NORMALE']
                 heure_debut_dt = pd.to_datetime(f"{jour_dt.date()} {heure_debut_theorique}")
                 limite_retard = heure_debut_dt + timedelta(minutes=CONFIG['TOLERANCE_RETARD_MIN'])
-                if premier_pointage > limite_retard:
-                    jour_actuel['Est_En_Retard'] = True
+                if premier_pointage > limite_retard: jour_actuel['Est_En_Retard'] = True
             
-            affectation_du_jour = df_affectations[(df_affectations['Matricule'].astype(str) == str(matricule)) & (df_affectations['Date'].dt.date == jour_dt.date())] if not df_affectations.empty else pd.DataFrame()
-            if not affectation_du_jour.empty:
-                affectation_info = affectation_du_jour.iloc[0]
-                jour_actuel.update({
-                    'Affectation': affectation_info.get('Affectation', ''),
-                    'Lieu_Chantier': affectation_info.get('Lieu_Chantier', ''),
-                    'Projet_Domicile': affectation_info.get('Projet_Domicile', '')
-                })
-                affectation_type = str(affectation_info.get('Affectation', '')).lower()
-                if 'bureau' in affectation_type and 'chantier' in affectation_type:
-                    if jour_actuel['Heures_Bureau'] > 0:
-                        jour_actuel['Heures_Chantier'] = 4.0
-                        jour_actuel['Statut_Jour'] += ' + Chantier'
-                    else: affectation_type = 'chantier'
-                if 'chantier' in affectation_type and 'Bureau' not in jour_actuel['Statut_Jour']:
-                    jour_actuel['Statut_Jour'] = 'Chantier'
-                    debut_virtuel = pd.to_datetime(f"{jour.isoformat()} {CONFIG['HEURE_DEBUT_JOURNEE_NORMALE']}")
-                    fin_virtuel = pd.to_datetime(f"{jour.isoformat()} {CONFIG['HEURE_FIN_JOURNEE_NORMALE_STANDARD_THEORIQUE']}")
-                    hn, h25, h50, h100 = calculer_heures_supplementaires(debut_virtuel, fin_virtuel, jour_semaine, est_jour_ferie, 0)
-                    jour_actuel.update({'Heures_Chantier': hn, 'HS_Chantier_25': h25, 'HS_Chantier_50': h50, 'HS_Chantier_100': h100})
-                elif 'domicile' in affectation_type and 'Bureau' not in jour_actuel['Statut_Jour']:
-                    jour_actuel['Statut_Jour'] = 'Domicile'
-                    debut_virtuel = pd.to_datetime(f"{jour.isoformat()} {CONFIG['HEURE_DEBUT_JOURNEE_NORMALE']}")
-                    fin_virtuel = pd.to_datetime(f"{jour.isoformat()} {CONFIG['HEURE_FIN_JOURNEE_NORMALE_STANDARD_THEORIQUE']}")
-                    hn, h25, h50, h100 = calculer_heures_supplementaires(debut_virtuel, fin_virtuel, jour_semaine, est_jour_ferie, 0)
-                    jour_actuel.update({'Heures_Domicile': hn, 'HS_Domicile_25': h25, 'HS_Domicile_50': h50, 'HS_Domicile_100': h100})
-            
-            if jour_actuel['Statut_Jour'] == 'Non Travaillé' and est_jour_ouvrable:
-                jour_actuel['Absence_Injustifiee'] = True
+            elif est_jour_ouvrable:
                 jour_actuel['Statut_Jour'] = 'Absence Injustifiée'
+                
             resultats_journaliers.append(jour_actuel)
 
     if not resultats_journaliers: return pd.DataFrame()
@@ -291,96 +373,123 @@ def analyser_pointages(df_pointage_raw, df_conges_raw, df_affectations_file_raw,
         'HS_Chantier_50': ('HS_Chantier_50', 'sum'), 'HS_Chantier_100': ('HS_Chantier_100', 'sum'),
         'Heures_Domicile': ('Heures_Domicile', 'sum'), 'HS_Domicile_25': ('HS_Domicile_25', 'sum'),
         'HS_Domicile_50': ('HS_Domicile_50', 'sum'), 'HS_Domicile_100': ('HS_Domicile_100', 'sum'),
-        'Heures_Pause_Dej': ('Heures_Pause_Dej', 'sum'),
-        'Nb Jours Absence Injustifiée': ('Absence_Injustifiee', 'sum'),
         'Lieu_Chantier': ('Lieu_Chantier', lambda x: ', '.join(x.dropna().astype(str).unique())),
         'Projet_Domicile': ('Projet_Domicile', lambda x: ', '.join(x.dropna().astype(str).unique())),
         'Nb Jours Chantier': ('Statut_Jour', lambda x: x.str.contains('Chantier').sum()),
         'Nb Jours Domicile': ('Statut_Jour', lambda x: x.str.contains('Domicile').sum()),
-        'Nb_Retards': ('Est_En_Retard', 'sum')  # NOUVEAU : Agréger le nombre de retards
+        'Nb_Retards': ('Est_En_Retard', 'sum')
     }
     resume_mensuel = df_analyse.groupby('Matricule').agg(**agg_dict).reset_index()
+
     def aggregate_conges(series):
         types = [REGLES_CONGES.get(t, {}) for t in series if t and t != ""]
         paye_employeur = sum(1 for t in types if t.get('paye_par') == 'Employeur')
         non_paye = sum(1 for t in types if not t.get('est_paye'))
         paye_cnss = sum(1 for t in types if t.get('paye_par') == 'CNSS')
-        details = ", ".join(sorted(list(set(s for s in series if s and s != ""))))
-        return paye_employeur, non_paye, paye_cnss, details
+        details_types = ", ".join(sorted(list(set(s for s in series if s and s != ""))))
+        return paye_employeur, non_paye, paye_cnss, details_types
     agg_conges = df_analyse.groupby('Matricule')['Type_Congé'].apply(aggregate_conges).apply(pd.Series)
     if not agg_conges.empty:
-        agg_conges.columns = ['Nb Jours Congé Payé par Employeur', 'Nb Jours Congé Non Payé', 'Nb Jours Payé par CNSS', 'Détail des Congés']
+        agg_conges.columns = ['Nb Jours Congé Payé par Employeur', 'Nb Jours Congé Non Payé', 'Nb Jours Payé par CNSS', 'Détail des Types de Congé']
         resume_mensuel = pd.merge(resume_mensuel, agg_conges, on='Matricule', how='left')
+    
     resume_mensuel.fillna(0, inplace=True)
-    resume_mensuel['Heures_Normales'] = resume_mensuel['Heures_Bureau'] + resume_mensuel['Heures_Chantier'] + resume_mensuel['Heures_Domicile']
-    resume_mensuel['Heures_Sup_Maj25'] = resume_mensuel['HS_Bureau_25'] + resume_mensuel['HS_Chantier_25'] + resume_mensuel['HS_Domicile_25']
-    resume_mensuel['Heures_Sup_Maj50'] = resume_mensuel['HS_Bureau_50'] + resume_mensuel['HS_Chantier_50'] + resume_mensuel['HS_Domicile_50']
-    resume_mensuel['Heures_Sup_Maj100'] = resume_mensuel['HS_Bureau_100'] + resume_mensuel['HS_Chantier_100'] + resume_mensuel['HS_Domicile_100']
-    resume_mensuel['Maj_25'] = (resume_mensuel['Heures_Sup_Maj25'] * 0.25).round(2)
-    resume_mensuel['Maj_50'] = (resume_mensuel['Heures_Sup_Maj50'] * 0.50).round(2)
-    resume_mensuel['Maj_100'] = (resume_mensuel['Heures_Sup_Maj100'] * 1.00).round(2)
-    resume_mensuel['Total_Majorations'] = (resume_mensuel['Maj_25'] + resume_mensuel['Maj_50'] + resume_mensuel['Maj_100']).round(2)
-    resume_mensuel['Jours_Payés'] = CONFIG['BASE_JOURS_PAYES'] - resume_mensuel['Nb Jours Absence Injustifiée'] - resume_mensuel.get('Nb Jours Congé Non Payé', 0) - resume_mensuel.get('Nb Jours Payé par CNSS', 0)
-    resume_mensuel['Jours_Payés'] = resume_mensuel['Jours_Payés'].clip(lower=0)
 
-    # NOUVEAU : Calcul du Score de Discipline
-    jours_ouvrables = df_analyse.groupby('Matricule')['Est_Jour_Ouvrable'].sum().reset_index(name='Jours_Ouvrables')
+    df_analyse['Absence_Fraction'] = df_analyse.apply(
+        lambda row: 1.0 - row['Jours_Presence_Travail']
+        if row['Est_Jour_Ouvrable'] and not row['Type_Congé'] and not row['Affectation'] else 0.0,
+        axis=1
+    )
+    total_absences = df_analyse.groupby('Matricule')['Absence_Fraction'].sum().reset_index(name='Nb Jours Absence Injustifiée')
+    resume_mensuel = pd.merge(resume_mensuel, total_absences, on='Matricule', how='left')
+    resume_mensuel['Nb Jours Absence Injustifiée'] = resume_mensuel['Nb Jours Absence Injustifiée'].fillna(0).round(2)
+    
+    # --- DÉBUT DE LA MODIFICATION ---
+    # Retour à l'ancienne méthode de calcul des Jours Payés
+    resume_mensuel['Jours Payés (par Employeur)'] = (
+        CONFIG['BASE_JOURS_PAYES'] -
+        resume_mensuel['Nb Jours Absence Injustifiée'] -
+        resume_mensuel.get('Nb Jours Congé Non Payé', 0) -
+        resume_mensuel.get('Nb Jours Payé par CNSS', 0)
+    )
+    resume_mensuel['Jours Payés (par Employeur)'] = resume_mensuel['Jours Payés (par Employeur)'].clip(lower=0).round(2)
+    # --- FIN DE LA MODIFICATION ---
+    
+    def format_absence_detail(df_group):
+        details = []
+        for _, row in df_group.iterrows():
+            if row['Type_Absence_Jour']:
+                details.append(f"{row['Date'].strftime('%d/%m/%Y')} ({row['Type_Absence_Jour']})")
+        return ', '.join(details)
+    absence_details = df_analyse.groupby('Matricule').apply(format_absence_detail).reset_index(name='Détail des Absences')
+    resume_mensuel = pd.merge(resume_mensuel, absence_details, on='Matricule', how='left')
+
+    jours_conge_detail = df_analyse[df_analyse['Type_Congé'] != ""].groupby('Matricule')['Date'].apply(lambda x: ', '.join(sorted([d.strftime('%d/%m/%Y') for d in x]))).reset_index(name='Détail Jours de Congé')
+    if not jours_conge_detail.empty:
+        resume_mensuel = pd.merge(resume_mensuel, jours_conge_detail, on='Matricule', how='left')
+
+    resume_mensuel['Total Heures Normales'] = (resume_mensuel['Heures_Bureau'] + resume_mensuel['Heures_Chantier'] + resume_mensuel['Heures_Domicile']).round(2)
+    resume_mensuel['Total HS 25%'] = (resume_mensuel['HS_Bureau_25'] + resume_mensuel['HS_Chantier_25'] + resume_mensuel['HS_Domicile_25']).round(2)
+    resume_mensuel['Total HS 50%'] = (resume_mensuel['HS_Bureau_50'] + resume_mensuel['HS_Chantier_50'] + resume_mensuel['HS_Domicile_50']).round(2)
+    resume_mensuel['Total HS 100%'] = (resume_mensuel['HS_Bureau_100'] + resume_mensuel['HS_Chantier_100'] + resume_mensuel['HS_Domicile_100']).round(2)
+    resume_mensuel['Majoration 25% (Val)'] = (resume_mensuel['Total HS 25%'] * 0.25).round(2)
+    resume_mensuel['Majoration 50% (Val)'] = (resume_mensuel['Total HS 50%'] * 0.50).round(2)
+    resume_mensuel['Majoration 100% (Val)'] = (resume_mensuel['Total HS 100%'] * 1.00).round(2)
+    resume_mensuel['Total Majorations'] = (resume_mensuel['Majoration 25% (Val)'] + resume_mensuel['Majoration 50% (Val)'] + resume_mensuel['Majoration 100% (Val)']).round(2)
+
+    jours_ouvrables = df_analyse[df_analyse['Est_Jour_Ouvrable']].groupby('Matricule').size().reset_index(name='Jours_Ouvrables')
     resume_mensuel = pd.merge(resume_mensuel, jours_ouvrables, on='Matricule', how='left')
     resume_mensuel['Jours_Ouvrables'] = resume_mensuel['Jours_Ouvrables'].fillna(0)
-    resume_mensuel['Conges_Autorises'] = resume_mensuel['Nb Jours Congé Payé par Employeur'] + resume_mensuel['Nb Jours Congé Non Payé'] + resume_mensuel['Nb Jours Payé par CNSS']
+    resume_mensuel['Conges_Autorises'] = resume_mensuel.get('Nb Jours Congé Payé par Employeur', 0) + resume_mensuel.get('Nb Jours Congé Non Payé', 0) + resume_mensuel.get('Nb Jours Payé par CNSS', 0)
     resume_mensuel['Jours_Prevus'] = resume_mensuel['Jours_Ouvrables'] - resume_mensuel['Conges_Autorises']
-    
+
     penalite_points = (1 * resume_mensuel['Nb_Retards']) + (4 * resume_mensuel['Nb Jours Absence Injustifiée'])
     
-    # Éviter la division par zéro si un employé n'a aucun jour prévu
-    score = 100 - (penalite_points / resume_mensuel['Jours_Prevus'].replace(0, pd.NA)) * 100
+    
+    bonus_points = resume_mensuel['Total Majorations']
+    
+    
+    points_nets_penalite = (penalite_points - bonus_points).clip(lower=0) 
+    
+    
+    score = 100 - (points_nets_penalite / resume_mensuel['Jours_Prevus'].replace(0, pd.NA)) * 100
+    
+    
     resume_mensuel['Score Discipline (%)'] = score.clip(0, 100).round(2).astype(str)
     resume_mensuel.loc[resume_mensuel['Jours_Prevus'] <= 0, 'Score Discipline (%)'] = '-'
 
-
-    jours_absence_detail = df_analyse[df_analyse['Absence_Injustifiee']].groupby('Matricule')['Date'].apply(lambda x: ', '.join(sorted([d.strftime('%d/%m/%Y') for d in x]))).reset_index(name='Détail des Absences')
-    if not jours_absence_detail.empty: resume_mensuel = pd.merge(resume_mensuel, jours_absence_detail, on='Matricule', how='left')
-    jours_conge_detail = df_analyse[df_analyse['Type_Congé'] != ""].groupby('Matricule')['Date'].apply(lambda x: ', '.join(sorted([d.strftime('%d/%m/%Y') for d in x]))).reset_index(name='Détail des Jours de Congé')
-    if not jours_conge_detail.empty: resume_mensuel = pd.merge(resume_mensuel, jours_conge_detail, on='Matricule', how='left')
-    resume_mensuel.fillna({'Détail des Absences': '', 'Détail des Jours de Congé': ''}, inplace=True)
+    resume_mensuel.fillna({'Détail des Absences': '', 'Détail Jours de Congé': '', 'Détail des Types de Congé': ''}, inplace=True)
     resume_mensuel['Matricule_numeric'] = pd.to_numeric(resume_mensuel['Matricule'], errors='coerce')
     resume_mensuel.sort_values(by='Matricule_numeric', inplace=True, na_position='first')
-    resume_mensuel.drop(columns=['Matricule_numeric'], inplace=True)
+    resume_mensuel.drop(columns=['Matricule_numeric', 'Jours_Ouvrables', 'Conges_Autorises', 'Jours_Prevus'], errors='ignore', inplace=True)
+    
     return resume_mensuel
 
 def exporter_excel(df_resultats, nom_fichier, colonnes_choisies, return_df=False):
     output = BytesIO()
     df_export = df_resultats.copy()
-    rename_dict_export = {
-        'Nb Jours Absence Injustifiée': 'Nb Jours Absence Injustifiée', 'Nb Jours Congé Payé par Employeur': 'Nb Jours Congé Payé par Employeur',
-        'Nb Jours Congé Non Payé': 'Nb Jours Congé Non Payé', 'Nb Jours Payé par CNSS': 'Nb Jours Payé par CNSS',
-        'Détail des Congés': 'Détail des Types de Congé', 'Détail des Jours de Congé': 'Détail Jours de Congé',
-        'Jours_Payés': 'Jours Payés (par Employeur)', 'Maj_25': 'Majoration 25% (Val)', 'Maj_50': 'Majoration 50% (Val)',
-        'Maj_100': 'Majoration 100% (Val)', 'Total_Majorations': 'Total Majorations', 'Heures_Normales': 'Total Heures Normales',
-        'Heures_Pause_Dej': 'Heures Pause Déjeuner', 'Détail des Absences': 'Détail des Absences',
-        'Nb Jours Chantier': 'Nb Jours Chantier', 'Nb Jours Domicile': 'Nb Jours Domicile',
-        'Lieu_Chantier': 'Lieu(x) de Chantier', 'Projet_Domicile': 'Projet(s) (Domicile)',
-        'Heures_Bureau': 'Heures Normales Bureau', 'Heures_Chantier': 'Heures Normales Chantier',
-        'Heures_Domicile': 'Heures Normales Domicile', 'Heures_Sup_Maj25': 'Total HS 25%',
-        'Heures_Sup_Maj50': 'Total HS 50%', 'Heures_Sup_Maj100': 'Total HS 100%',
-        'Nb_Retards': 'Nb Jours en Retard' # NOUVEAU : Renommage pour l'export
-    }
-    df_export = df_export.rename(columns=rename_dict_export)
-    colonnes_a_exporter = [col for col in colonnes_choisies if col in df_export.columns]
     
-    # Assurer que la nouvelle colonne est disponible si choisie
-    if 'Score Discipline (%)' not in colonnes_a_exporter and 'Score Discipline (%)' in colonnes_choisies:
-        colonnes_a_exporter.append('Score Discipline (%)')
-
+    if 'Matricule' in colonnes_choisies:
+        colonnes_a_exporter = ['Matricule'] + [col for col in colonnes_choisies if col in df_export.columns and col != 'Matricule']
+    else:
+        colonnes_a_exporter = [col for col in colonnes_choisies if col in df_export.columns]
+        
     df_final_export = df_export.reindex(columns=colonnes_a_exporter)
-    if return_df: return df_final_export
+    
+    if return_df: 
+        return df_final_export
+
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_final_export.to_excel(writer, index=False, sheet_name='Rapport')
         worksheet = writer.sheets['Rapport']
+        
         for idx, col in enumerate(df_final_export):
             series = df_final_export[col]
-            try: max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
-            except (ValueError, TypeError): max_len = len(str(col)) + 2
+            try:
+                max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
+            except (ValueError, TypeError):
+                max_len = len(str(col)) + 2
             worksheet.set_column(idx, idx, max_len)
+            
     processed_data = output.getvalue()
     return processed_data
